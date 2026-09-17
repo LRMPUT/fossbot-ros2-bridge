@@ -1,0 +1,39 @@
+services:
+  fossbot_bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fossbot_bridge:jazzy
+    container_name: fossbot_bridge
+    # Host networking is required, not convenience: the robot pushes telemetry
+    # to UDP 5005 on this machine. Behind Docker's NAT the agent would have to
+    # reply to a translated address, and DDS discovery for any ROS node outside
+    # the container would not work either.
+    network_mode: host
+    ipc: host
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - XDG_RUNTIME_DIR=/tmp/runtime-root
+      - LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-0}
+    volumes:
+      # Live-mount the source so edits take effect without a rebuild
+      # (the image is built with --symlink-install).
+      - ./ws/src:/ws/src
+      # Lets libnss-mdns inside the container ask the host's avahi-daemon to
+      # resolve fossbotrpi1.local, so the robot can be addressed by name even
+      # when DHCP moves it. nss-mdns 0.15 uses this socket, NOT the D-Bus one.
+      - /var/run/avahi-daemon/socket:/var/run/avahi-daemon/socket:rw
+      # X11 for rviz2 / rqt. Needs `xhost +local:docker` on the host once per
+      # login; run.sh does that for you.
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-/home/${USER}/.Xauthority}:/root/.Xauthority:rw
+    devices:
+      # GPU node for rviz2. Drop this line and set LIBGL_ALWAYS_SOFTWARE=1 if
+      # the machine has no /dev/dri.
+      - /dev/dri:/dev/dri
+    stdin_open: true
+    tty: true
+    command: sleep infinity

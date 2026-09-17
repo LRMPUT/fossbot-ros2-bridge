@@ -1,0 +1,333 @@
+<?xml version="1.0" ?>
+<robot name="fossbot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:include filename="$(find fossbot_description)/urdf/materials.xacro" />
+<!-- <xacro:include filename="$(find fossbot_description)/urdf/fossbot_educational_gazebo.trans" /> -->
+<!-- gazebo plugins intentionally omitted: on the real robot the hardware
+     bridge publishes /scan, /odom and /joint_states instead. -->
+<link name="base_link">
+  <inertial>
+    <origin xyz="-1.3603525122596214e-05 -0.0012199693805202846 0.012227390076718293" rpy="0 0 0"/>
+    <mass value="0.7158"/>
+    <inertia ixx="0.003805" iyy="0.0035" izz="0.007095" ixy="2e-06" iyz="-8e-06" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="base_footprint"/>
+
+<joint name="base_footprint_to_base_link" type="fixed">
+  <parent link="base_footprint"/>
+  <child link="base_link"/>
+  <origin xyz="-0.03176 0 0" rpy="0 0 1.57079632679"/>
+</joint>
+
+<link name="middle_1">
+  <inertial>
+    <origin xyz="0.07199608464446365 -0.03451691283647535 0.01164222932640736" rpy="0 0 0"/>
+    <mass value="0.6638"/>
+    <inertia ixx="0.002941" iyy="0.004591" izz="0.00734" ixy="-2.2e-05" iyz="-0.0" ixz="-2e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.071929 -0.031054 -0.0265" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/middle_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.071929 -0.031054 -0.0265" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/middle_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="left_fender_1">
+  <inertial>
+    <origin xyz="0.023489273994684493 -0.003882357713490516 -0.022094333981198547" rpy="0 0 0"/>
+    <mass value="0.0612"/>
+    <inertia ixx="0.000134" iyy="5.9e-05" izz="0.000126" ixy="-8e-06" iyz="5e-06" ixz="6e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.073908 0.027002 -0.056306" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/left_fender_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="blue"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.073908 0.027002 -0.056306" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/left_fender_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="right_fender_1">
+  <inertial>
+    <origin xyz="-0.023484092251422506 -0.005382805949463394 -0.022095445009908225" rpy="0 0 0"/>
+    <mass value="0.0612"/>
+    <inertia ixx="0.000134" iyy="5.9e-05" izz="0.000126" ixy="8e-06" iyz="5e-06" ixz="-6e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.073972 0.025161 -0.056307" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/right_fender_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="blue"/>
+  </visual>
+  <collision>
+    <origin xyz="0.073972 0.025161 -0.056307" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/right_fender_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="wheel_v4__1__1">
+  <inertial>
+    <origin xyz="-0.077848 0.03176 -0.01476" rpy="0 0 0"/>
+    <mass value="0.0827"/>
+    <inertia ixx="0.0001" iyy="0.0001" izz="0.0001" ixy="0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.077848 0.03176 -0.01476" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/wheel_v4__1__1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="black"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.077848 0.03176 -0.01476" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/wheel_v4__1__1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="wheel_v4_1">
+  <inertial>
+    <origin xyz="0.078037 0.03176 -0.01476" rpy="0 0 0"/>
+    <mass value="0.0827"/>
+    <inertia ixx="0.0001" iyy="0.0001" izz="0.0001" ixy="0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.078037 0.03176 -0.01476" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/wheel_v4_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="black"/>
+  </visual>
+  <collision>
+    <origin xyz="0.078037 0.03176 -0.01476" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/wheel_v4_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="top_1">
+  <inertial>
+    <origin xyz="-0.06519066806409202 -0.03177839406940825 0.013173049099162774" rpy="0 0 0"/>
+    <mass value="0.3243"/>
+    <inertia ixx="0.001871" iyy="0.00249" izz="0.004287" ixy="7e-06" iyz="1.3e-05" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.065165 -0.039806 -0.053" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/top_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="blue"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.065165 -0.039806 -0.053" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/top_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="caster">
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/caster_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.000318 0.062858 0.000922" rpy="0 0 0"/>
+    <geometry>
+      <sphere radius="0.015"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="top_mount">
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/top_moount_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/top_moount_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="lidar_base">
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/lidar_base_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/lidar_base_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="lidar">
+  <visual>
+    <origin xyz="0.000285 0.015746 -0.135" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/lidar__1__1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="black"/>
+  </visual>
+  <collision>
+    <origin xyz="0.000285 0.015746 -0.135" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find fossbot_description)/meshes/lidar__1__1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="camera_link">
+  <inertial>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <mass value="0.0083"/>
+    <inertia ixx="1e-05" iyy="1e-05" izz="1e-05" ixy="0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <box size="0.025 0.024 0.009"/>
+    </geometry>
+    <material name="green"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <box size="0.025 0.024 0.009"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="camera_optical_frame"/>
+<link name="lidar_scan_frame"/>
+
+<joint name="Rigid 17" type="fixed">
+  <origin xyz="-0.071929 0.031054 0.0265" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="middle_1"/>
+</joint>
+
+<joint name="Rigid 18" type="fixed">
+  <origin xyz="0.008743 -0.066808 0.003306" rpy="0 0 0"/>
+  <parent link="top_1"/>
+  <child link="left_fender_1"/>
+</joint>
+
+<joint name="Rigid 19" type="fixed">
+  <origin xyz="-0.139137 -0.064967 0.003307" rpy="0 0 0"/>
+  <parent link="top_1"/>
+  <child link="right_fender_1"/>
+</joint>
+
+<joint name="Revolute 20" type="continuous">
+  <origin xyz="0.077848 -0.03176 0.01476" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="wheel_v4__1__1"/>
+  <axis xyz="0.999996 0.00298 -0.0"/>
+  <dynamics damping="0.5" friction="0.2"/>
+</joint>
+
+<joint name="Revolute 21" type="continuous">
+  <origin xyz="-0.078037 -0.03176 0.01476" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="wheel_v4_1"/>
+  <axis xyz="0.999996 -0.00298 0.0"/>
+  <dynamics damping="0.5" friction="0.2"/>
+</joint>
+
+<joint name="Rigid 22" type="fixed">
+  <origin xyz="0.137094 0.008752 0.0265" rpy="0 0 0"/>
+  <parent link="middle_1"/>
+  <child link="top_1"/>
+</joint>
+
+<joint name="caster_joint" type="fixed">
+  <origin xyz="0 0 -0.005" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="caster"/>
+</joint>
+
+<joint name="top_mount_joint" type="fixed">
+  <origin xyz="0 0 0" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="top_mount"/>
+</joint>
+
+<joint name="lidar_base_joint" type="fixed">
+  <origin xyz="0 0 0" rpy="0 0 0"/>
+  <parent link="top_mount"/>
+  <child link="lidar_base"/>
+</joint>
+
+<joint name="lidar_joint" type="fixed">
+  <origin xyz="-0.000285 -0.015746 0.135" rpy="0 0 0"/>
+  <parent link="lidar_base"/>
+  <child link="lidar"/>
+</joint>
+
+<joint name="camera_joint" type="fixed">
+  <origin xyz="0.0 -0.062 0.092" rpy="0 0 -1.57079632679"/>
+  <parent link="top_mount"/>
+  <child link="camera_link"/>
+</joint>
+
+<joint name="camera_optical_joint" type="fixed">
+  <origin xyz="0 0 0" rpy="-1.57079632679 0 -1.57079632679"/>
+  <parent link="camera_link"/>
+  <child link="camera_optical_frame"/>
+</joint>
+
+<joint name="lidar_scan_joint" type="fixed">
+  <origin xyz="0 0 0" rpy="0 0 0"/>
+  <parent link="lidar"/>
+  <child link="lidar_scan_frame"/>
+</joint>
+
+</robot>

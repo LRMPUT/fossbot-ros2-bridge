@@ -1,0 +1,60 @@
+/fossbot_bridge:
+  ros__parameters:
+    robot_host: "fossbotrpi1.local"
+
+    # Measured from the v2 URDF meshes in fossbot_educational_description.
+    # wheel_track is between wheel CENTRE PLANES (+-0.0933), not between the
+    # URDF joint origins (+-0.0779) -- the latter is ~17% short and skews yaw.
+    wheel_radius: 0.03524
+    wheel_track: 0.1866
+
+    # Slots on the encoder disc. VERIFY THIS before trusting /odom: see the
+    # calibration section in the README.
+    encoder_ticks_per_rev: 20.0
+
+    odom_frame: "odom"
+    base_frame: "base_footprint"
+    imu_frame: "base_link"
+    publish_tf: true
+
+    # Raw MCP3008 counts below this read as "on the line".
+    on_line_threshold: 200
+
+    ir_range_min: 0.05
+    ir_range_max: 0.40
+    cmd_rate_hz: 50.0
+
+/fossbot_lidar:
+  ros__parameters:
+    robot_host: "fossbotrpi1.local"
+    frame_id: "lidar_scan_frame"
+    angle_bins: 360
+    range_min: 0.15
+    range_max: 12.0
+    # Lidar angular alignment. Two independent corrections:
+    #
+    # invert: the RPLIDAR reports angles increasing CLOCKWISE, while ROS
+    #   LaserScan is counter-clockwise (right-hand rule about +Z). Without this
+    #   the scan is MIRRORED, and no amount of rotation fixes it -- the
+    #   giveaway is that adding +90 of offset rotates the picture the wrong way.
+    #
+    # angle_offset_deg: lidar_scan_frame inherits base_link's +90 deg yaw (the
+    #   CAD model was exported with the robot facing along its own Y axis), so
+    #   -90 puts the scan back in line with base_footprint's +X = forward.
+    #
+    # To verify: put an object ~30 cm directly in front of the robot and run
+    #   ros2 run fossbot_bridge scan_bearing
+    # Straight ahead should read ~0 deg, an object on the left ~+90.
+    angle_offset_deg: -90.0
+    invert: true
+
+/fossbot_camera:
+  ros__parameters:
+    robot_host: "fossbotrpi1.local"
+    frame_id: "camera_optical_frame"
+    # Decode JPEG to /camera/image_raw on this PC, matching the topic the
+    # Gazebo sim publishes. Set false if nothing needs raw images.
+    publish_raw: true
+    # Nominal lens FOV for the synthesised CameraInfo. This is not a
+    # calibration -- see the note in camera_node.make_camera_info.
+    horizontal_fov_deg: 66.0

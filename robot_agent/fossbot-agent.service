@@ -1,0 +1,21 @@
+[Unit]
+Description=FOSSBot hardware agent (inside the fb container)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The fb container has restart=always so it is back after a reboot, but the
+# agent inside it was started with `docker exec` and does not come back on its
+# own. This robot resets under motor load, so without this every brownout
+# needs a manual restart_agent.sh.
+#
+# Wait for the container, then (re)start the agent inside it.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do docker inspect -f "{{.State.Running}}" fb 2>/dev/null | grep -q true && exit 0; sleep 2; done; exit 1'
+ExecStart=/bin/bash -c 'docker exec fb pkill -9 -f fossbot_agent.py 2>/dev/null; docker exec -d fb bash -c "cd /ws && python3 fossbot_agent.py > /tmp/agent.log 2>&1"'
+ExecStop=/bin/bash -c 'docker exec fb pkill -9 -f fossbot_agent.py 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target

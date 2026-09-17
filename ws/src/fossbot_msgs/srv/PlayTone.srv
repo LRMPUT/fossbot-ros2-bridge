@@ -1,0 +1,5 @@
+float32 frequency       # Hz; 0 silences the buzzer
+float32 duration        # seconds, clamped to 10
+---
+bool success
+string message

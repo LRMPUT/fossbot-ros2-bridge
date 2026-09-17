@@ -1,0 +1,17 @@
+# colcon build output. These live in the container's writable layer at runtime,
+# not here, but keep them out in case anyone builds on the host.
+ws/build/
+ws/install/
+ws/log/
+
+# Camera stack built on the robot by build_camera_stack.sh; it is installed to
+# the robot's filesystem, never checked in.
+opt/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+*.log
+.vscode/
+.idea/

@@ -1,0 +1,11 @@
+Provenance
+==========
+
+ws/src/fossbot_description contains URDF and STL meshes derived from
+`fossbot_educational_description` in LRMPUT/FOSSBotEduSim, with the gazebo
+plugin block removed (on real hardware the bridge publishes those topics
+instead). `sync_description.sh` re-vendors them.
+
+That upstream package declares no license, so fossbot_description does not
+assert one. fossbot_bridge and fossbot_msgs are original to this repository and
+are currently marked MIT -- change that if it does not match the group's policy.

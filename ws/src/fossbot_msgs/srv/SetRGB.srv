@@ -1,0 +1,8 @@
+# The RGB LED is a common-cathode part driven straight off GPIO, so each
+# channel is on or off -- there is no per-channel brightness.
+bool red
+bool green
+bool blue
+---
+bool success
+string message
