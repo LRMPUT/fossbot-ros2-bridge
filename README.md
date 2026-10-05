@@ -1,416 +1,486 @@
-# fossbot_ros2_bridge
+# fossbot-ros2-bridge
 
-A ROS 2 Jazzy bridge that exposes the FOSSBot edu robot's hardware as ROS
-topics, services and TF. ROS runs in a container **on the PC**; a small agent
-runs **on the robot** and owns the hardware.
+A ROS 2 Jazzy bridge for the [FOSSBot](https://github.com/eellak/fossbot)
+educational robot. It exposes the robot's motors, encoders, IMU, analog sensors,
+buttons, LED, buzzer, RPLIDAR and Pi camera as standard ROS 2 topics, services
+and TF.
 
-The published interface deliberately matches what the Gazebo sim in
-`FOSSBotEduSim` publishes (`/cmd_vel`, `/odom`, `/scan`, `/joint_states`, `/tf`,
-frames `odom` → `base_footprint`), so Nav2 and slam_toolbox configs written
-against the simulator run unchanged against the real robot.
+ROS 2 runs **on your PC**, in Docker. Each FOSSBot runs a small Python agent
+that owns its hardware and needs no ROS at all. The two talk over the network.
 
-## Why it is built this way
+The ROS interface mirrors the FOSSBot Gazebo simulation (`/cmd_vel`, `/odom`,
+`/scan`, `/joint_states`, `/tf`, frames `odom` → `base_footprint`), so Nav2 and
+slam_toolbox configurations written against the simulator work on the real
+robot unchanged.
 
-The upstream `fossbot-lib-real` API is call-per-read (`get_reading(pin)`,
-`get_acceleration(axis)`), which is fine on the robot and wrong across a
-network: every sensor read would cost a wifi round trip, and a single ROS cycle
-touching a dozen sensors would cost a dozen of them.
+```
+ PC: Docker, ROS 2 Jazzy                    Robot: Raspberry Pi 5, no ROS
++-----------------------------+            +-----------------------------+
+| fossbot_bridge   -> topics  | <-UDP 5005-| fossbot_agent.py            |
+| fossbot_lidar    -> /scan   |  telemetry |   GPIO, SPI ADCs, I2C IMU   |
+| fossbot_camera   -> /camera | -UDP 5006->|   motors (closed loop)      |
+| robot_state_publisher       |  commands  |   RPLIDAR, camera, PMIC     |
+| RViz, Nav2, your nodes ...  | <-TCP 5007>|                             |
+|                             |  services  |                             |
+|                             | <-TCP 5008-|  lidar scans                |
+|                             | <-TCP 5009-|  camera JPEG frames         |
++-----------------------------+            +-----------------------------+
+```
 
-Instead the robot-side agent samples **everything locally** at 100 Hz — SPI and
-I2C reads are sub-millisecond there — and ships one batched 102-byte frame per
-cycle. The PC pays one network hop per cycle regardless of how many sensors it
-wants.
+## Requirements
 
-| Transport | Port | Direction | Why |
-|---|---|---|---|
-| UDP | 5005 | robot → PC | Telemetry. Newest sample supersedes the last, so TCP's head-of-line blocking would turn a 4 ms link into an occasional 200 ms one for no benefit. A lost frame is replaced 11 ms later. |
-| UDP | 5006 | PC → robot | Velocity commands. Same reasoning, plus a sequence number so reordered stragglers are dropped. |
-| TCP | 5007 | PC ↔ robot | Services (LED, buzzer, e-stop, odom reset). Discrete and rare — there is no "newer value" to fall back on, so these must not be lost. |
-| TCP | 5008 | robot → PC | Lidar scans. A scan is large and only useful complete. |
-| TCP | 5009 | robot → PC | Camera. A JPEG frame is tens of kB, far past the MTU, so UDP would mean hand-rolled fragmentation where one lost datagram destroys the frame. |
+**Robot**
 
-`protocol.py` is the single definition of the wire format and is deployed
-verbatim to both ends, so they cannot drift apart.
+- Reference platform: FOSSBot v2 PCB (TB6612, 2× MCP3008, MPU-6050/6500)
+  and a Raspberry Pi running Ubuntu 24.04 (arm64)
+- Docker, with the robot's login user in the `docker` group
+- SPI and I2C enabled (`dtparam=spi=on` and `dtparam=i2c_arm=on` in
+  `/boot/firmware/config.txt`)
+- Optional: RPLIDAR A1 on USB, Raspberry Pi Camera Module 3 (IMX708)
 
-**Wheel control is closed-loop and runs on the robot**, never across the
-network, so wifi jitter cannot destabilise it. This matters: the two motors
-differ by ~11% at identical duty, so open-loop driving veers noticeably.
+**PC**
 
-The loop tracks **accumulated distance, not velocity**, and that choice is
-forced by the encoders. With 20 ticks/rev, a velocity estimate over a 0.2 s
-window quantises to 0.055 m/s — 46% of a 0.12 m/s setpoint. A velocity loop
-therefore spends its time reacting to whether one tick landed inside the window,
-each wheel independently, and the two fight each other: the robot visibly
-weaves. Tick *counts* have no such noise. Integrating the commanded velocity
-into a target distance and driving the position error to zero gives the same
-steady-state speed, holds the wheels in lockstep so the robot keeps a heading,
-and is inherently smooth. Measured: 0.97 m travelled against 0.96 m commanded,
-wheels within 0.31 rad (~3 deg of heading) over 8 s.
+- Linux x86_64 with Docker and Docker Compose
+- Optional: an X11 display for RViz; the bridge also works headless.
+- Optional: Avahi for `<robot>.local` hostnames; IP addresses need no Avahi.
 
-## Measured performance
+`run.sh` enables the GUI overlay when `DISPLAY` is set. Set `FOSSBOT_MDNS=1`
+to pass the host's Avahi socket into the container when using `.local` names;
+otherwise use the robot's IP address.
 
-Over wifi (`M321-Lab`), robot at 192.168.0.100, PC at 192.168.0.102:
+PC and robot must be on the same network, and the network must allow the UDP
+and TCP ports above between them. Client-isolated guest Wi-Fi will not work.
+`robot_agent/pinmap.py` targets the reference v2 PCB. Other FOSSBot boards
+need a matching pin map and per-robot config; host selection and PC-side ROS
+parameters are configurable for each robot.
 
-| | |
-|---|---|
-| Telemetry rate | 88–90 Hz (100 Hz target; the 16 SPI + 1 I2C reads per cycle are the limit) |
-| Frame loss | 0.06% over 25,021 frames |
-| Round-trip latency | median 7–11 ms, min 4.7 ms, p95 22 ms |
-| `/scan` | 6.7 Hz, ~135 valid returns per rotation |
-| `/camera/image_raw/compressed` | 15 Hz, ~22 kB per frame (~2.6 Mbit/s) |
-| Velocity tracking | 2.6–18.5% error, see calibration below |
+## Robot setup (once per robot)
+
+1. Install your SSH key on the robot:
+
+   ```bash
+   ssh-copy-id <user>@<robot>
+   ```
+
+2. Provision it from this repository:
+
+   ```bash
+   scripts/setup_robot.sh <user>@<robot> --camera
+   ```
+
+   This copies the agent to `~/fossbot` on the robot, builds the agent image,
+   creates a privileged `fb` container that restarts with the robot, and
+   installs a systemd unit that starts the agent at boot. It asks for the
+   robot user's password once, for `sudo`.
+
+   - `--camera` also builds the Raspberry Pi 5 camera stack (about 15 minutes;
+     see [Camera](#camera) for why it must be built from source). Omit it if
+     there is no camera.
+   - `--http-time` installs a boot-time clock sync over HTTP, for networks that
+     block NTP (see [Troubleshooting](#troubleshooting)).
+   - `--config robot.json` installs a per-robot settings file.
+   - `--invert both` (or `left`/`right`) if the motors are wired reversed —
+     see [Motor direction](#1-motor-direction).
+
+3. Check the motor direction and calibrate — see
+   [Per-robot setup](#per-robot-setup). Every robot is wired slightly
+   differently, and the defaults are not verified for yours.
+
+The scripts also read `FOSSBOT_HOST` (robot hostname or IP), `FOSSBOT_USER`
+(the robot's login, if it differs from yours) and `FOSSBOT_DIR` (agent directory
+on the robot, default `~/fossbot`), so `scripts/restart_agent.sh` works without
+arguments once those are set.
 
 ## Quick start
 
 ```bash
-./run.sh
+FOSSBOT_HOST=<robot> ./run.sh
 ```
 
-Builds the image if needed, starts the container, **builds the workspace**, and
-drops you into a shell.
-
-The workspace build is not optional. `/ws/install` lives in the container's
-writable layer, not in a mounted volume, so `docker compose down` (or any
-`docker rm`) discards it and the next container falls back to whatever was baked
-into the image. Any package added since shows up as
-`PackageNotFoundError: package 'fossbot_description' not found`. `run.sh` runs an
-incremental `colcon build` every time, which costs a couple of seconds and makes
-that impossible.
-Then start the robot-side agent:
+`<robot>` is the robot's hostname or IP, for example `fossbot1.local`. The
+script builds the image on first use, starts the container, builds the ROS
+workspace, and opens a shell in the container. There:
 
 ```bash
-./restart_agent.sh
+ros2 launch fossbot_bridge bringup.launch.py use_rviz:=true
 ```
 
-This needs passwordless ssh to the robot. If it prompts, install your key once:
+A **dashboard** window opens with it: link quality, battery, motor state and
+duty, commanded versus measured motion, odometry and every sensor, plus buttons
+to enable/disable the motors, toggle the e-stop and reset odometry. Without a
+display it prints the same summary to the terminal every few seconds instead.
+It only reads the bridge's topics, so you can also run it on its own on any
+machine on the same `ROS_DOMAIN_ID`:
 
 ```bash
-ssh-copy-id admin@fossbotrpi1.local
+ros2 run fossbot_bridge dashboard
 ```
 
-Note there is **no sudo** anywhere in these scripts: `admin` is in the robot's
-`docker` group, so docker works directly. Calling sudo over a non-interactive
-ssh fails with "sudo: a terminal is required to read the password".
-
-And in the container:
+Drive with the keyboard from a **second** terminal:
 
 ```bash
-ros2 launch fossbot_bridge bringup.launch.py
+docker exec -it fossbot_bridge bash -lc 'source /ws/install/setup.bash && ros2 run fossbot_bridge teleop'
 ```
 
-Point it at a different robot with `robot_host:=fossbotrpi2.local`, or skip the
-lidar with `use_lidar:=false`.
+**Motors start disabled. Press `e` in teleop before anything moves.** The agent
+ignores `/cmd_vel` until `/fossbot/enable_motors` is called with `true`, and it
+stops the motors if no command arrives for 500 ms — closing the PC side brings
+the robot to a stop.
 
-Teleop, which handles the motor-enable handshake for you:
+Useful launch arguments:
+
+| Argument | Default | |
+|---|---|---|
+| `robot_host` | `$FOSSBOT_HOST` | Robot hostname or IP. Required. |
+| `use_rviz` | `false` | Start RViz with the bundled config |
+| `use_lidar` | `true` | Start the lidar node |
+| `use_camera` | `true` | Start the camera node |
+| `use_description` | `true` | Publish the URDF and TF below `base_footprint` |
+| `use_dashboard` | `true` | Show the status dashboard |
+| `params_file` | bundled `bridge.yaml` | ROS parameters |
+
+### Several robots on one network
+
+Give every robot/PC pair its own `ROS_DOMAIN_ID`. The bridge publishes on the
+PC with host networking, so two PCs on the same domain see — and can command —
+each other's robots:
 
 ```bash
-ros2 run fossbot_bridge teleop
+ROS_DOMAIN_ID=3 FOSSBOT_MDNS=1 FOSSBOT_HOST=fossbot3.local ./run.sh
 ```
 
-**Motors start disabled — press `e` before anything moves.** The agent ignores
-`/cmd_vel` until `/fossbot/enable_motors` is called with `true`, so a teleop
-session that looks dead is usually just a missing `e`; the status line at the
-bottom says which state you are in. Teleop also needs a real terminal, so
-attach with `docker exec -it`, not a bare `docker exec`.
+Run one bridge per workstation and one controlling workstation per robot.
+The container name and host ports are shared; changing `ROS_DOMAIN_ID` alone
+does not support multiple bridge containers on the same workstation.
 
 ## Interface
-
-### Frames and the robot model
-
-`fossbot_description` publishes the URDF and every fixed transform below
-`base_footprint`. **The bridge alone is not enough**: it only publishes
-`odom -> base_footprint`, so without `robot_state_publisher` there is no
-transform for `lidar_scan_frame` and RViz cannot place `/scan` at all — the
-topic lists, the rate looks healthy, and nothing is drawn. `bringup.launch.py`
-starts it by default (`use_description:=false` to opt out).
-
-The URDF is vendored from `fossbot_educational_description` in FOSSBotEduSim,
-with the gazebo plugin block stripped (on real hardware the bridge provides
-those topics). Re-run `sync_description.sh` if the sim model changes.
 
 ### Published
 
 | Topic | Type | Rate |
 |---|---|---|
 | `/odom` | `nav_msgs/Odometry` | ~90 Hz |
-| `/joint_states` | `sensor_msgs/JointState` | ~90 Hz |
 | `/tf` | `odom` → `base_footprint` | ~90 Hz |
-| `/scan` | `sensor_msgs/LaserScan` | ~6.7 Hz |
-| `/imu/data_raw` | `sensor_msgs/Imu` | ~90 Hz |
+| `/joint_states` | `sensor_msgs/JointState` | ~90 Hz |
+| `/imu/data_raw` | `sensor_msgs/Imu` (no orientation) | ~90 Hz |
+| `/scan` | `sensor_msgs/LaserScan` | lidar rotation rate, ~6 Hz |
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` (JPEG) | 15 Hz |
+| `/camera/image_raw` | `sensor_msgs/Image` (decoded on the PC) | 15 Hz |
+| `/camera/camera_info` | `sensor_msgs/CameraInfo` | 15 Hz |
 | `/fossbot/line_sensors` | `fossbot_msgs/LineSensors` | ~90 Hz |
-| `/fossbot/analog_raw` | `fossbot_msgs/AnalogRaw` (all 16 ADC channels) | ~90 Hz |
-| `/fossbot/range/{front,back}_{left,right}` | `sensor_msgs/Range` | ~90 Hz |
+| `/fossbot/range/{front,back}_{left,right}` | `sensor_msgs/Range` (IR) | ~90 Hz |
 | `/fossbot/ultrasonic` | `sensor_msgs/Range` | ~90 Hz |
+| `/fossbot/analog_raw` | `fossbot_msgs/AnalogRaw` (all 16 ADC channels) | ~90 Hz |
 | `/fossbot/buttons` | `fossbot_msgs/Buttons` | ~90 Hz |
-| `/fossbot/light` | `sensor_msgs/Illuminance` | ~90 Hz |
-| `/fossbot/microphone`, `/fossbot/photodiode` | `std_msgs/Float32` | ~90 Hz |
-| `/fossbot/link_status` | `fossbot_msgs/LinkStatus` | 2 Hz |
+| `/fossbot/light` | `sensor_msgs/Illuminance` (relative) | ~90 Hz |
+| `/fossbot/microphone`, `/fossbot/photodiode` | `std_msgs/Float32` (volts) | ~90 Hz |
 | `/fossbot/battery` | `sensor_msgs/BatteryState` | ~90 Hz |
-| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` (jpeg) | ~15 Hz |
-| `/camera/camera_info` | `sensor_msgs/CameraInfo` | ~15 Hz |
-| `/camera/image_raw` | `sensor_msgs/Image` (decoded on the PC) | ~15 Hz |
+| `/fossbot/link_status` | `fossbot_msgs/LinkStatus` | 2 Hz |
+
+`robot_state_publisher` also publishes `/robot_description` and the static TF
+tree from `fossbot_description`.
 
 ### Subscribed
 
-- `/cmd_vel` — `geometry_msgs/Twist`, closed-loop velocity
-- `/fossbot/motor_cmd` — `fossbot_msgs/MotorCommand`, raw per-wheel duty −1..1
-  (suspends the PI loop while in use)
+- `/cmd_vel` — `geometry_msgs/Twist`. Closed-loop wheel control on the robot.
+- `/fossbot/motor_cmd` — `fossbot_msgs/MotorCommand`, raw per-wheel duty
+  −1..1. Suspends the closed loop while in use.
 
 ### Services
 
-- `/fossbot/enable_motors` — `std_srvs/SetBool`. **Motors ignore `/cmd_vel`
-  until this is called with `true`.**
+- `/fossbot/enable_motors` — `std_srvs/SetBool`
 - `/fossbot/estop` — `std_srvs/SetBool`
-- `/fossbot/set_rgb` — `fossbot_msgs/SetRGB` (on/off per channel; the LED is
-  driven straight off GPIO, so there is no brightness control)
-- `/fossbot/play_tone` — `fossbot_msgs/PlayTone`
 - `/fossbot/reset_odometry` — `std_srvs/Trigger`
+- `/fossbot/set_rgb` — `fossbot_msgs/SetRGB` (each channel on/off; no brightness)
+- `/fossbot/play_tone` — `fossbot_msgs/PlayTone`
 
-### Safety
+### Notes on what the values mean
 
-Motors are disabled at startup, and the agent cuts them if no command frame
-arrives for 500 ms — pull the plug on the PC and the robot coasts to a stop
-rather than driving on.
+- **Odometry** comes from single-channel encoders: 20 ticks per wheel turn, and
+  **no direction sensing** — tick sign is taken from the commanded direction.
+  A wheel pushed backwards by hand still counts forwards. Covariances are set
+  loose accordingly.
+- **IR ranges** are a monotonic approximation of an uncharacterised sensor.
+  Treat threshold crossings as meaningful, not the absolute distance.
+- **`/fossbot/light`** is relative brightness, not calibrated lux.
+- **`/fossbot/battery`**: `voltage` is the Pi 5's 5 V input rail as measured
+  by its PMIC (`EXT5V_V`) — the rail that collapses in a brownout.
+  `percentage` is an **estimate** from that rail unless you add a battery
+  sense; see [Battery](#battery).
+- **`CameraInfo`** is a nominal pinhole model from the lens field of view, not
+  a calibration. Run `camera_calibration` if you need metric accuracy.
 
-## If RViz shows nothing
+## Per-robot setup
 
-Three separate causes, all of which produce exactly the same symptom — topics
-listed, nothing rendered:
-
-1. **No `robot_state_publisher`.** `/scan` lives in `lidar_scan_frame`, which
-   has no transform without it. Launch with `use_description:=true` (the
-   default), or check `ros2 run tf2_ros tf2_echo base_footprint lidar_scan_frame`.
-2. **Fixed Frame set to `map`.** Nothing publishes a `map` frame until you start
-   SLAM. Set it to `odom`. The shipped RViz config already does.
-3. **QoS mismatch.** RViz displays default to Reliable. A Best Effort publisher
-   never matches a Reliable subscriber, so the topic appears and delivers
-   nothing. This bridge publishes everything **Reliable** for that reason — a
-   Reliable publisher satisfies Best Effort subscribers (Nav2, slam_toolbox)
-   too, so it is strictly the more compatible choice. If you add your own
-   publishers here, do the same.
-
-   **The one exception is `/camera/image_raw`.** A 640x480 bgr8 frame is 921 kB,
-   and pushing that Reliable at 15 fps dropped half the frames in testing — the
-   publisher's history wrapped before the subscriber drained it. It is Best
-   Effort with depth 1, which restored the full 14.5 Hz. Set RViz's Image
-   display to Best Effort for it, or use `/camera/image_raw/compressed`, which
-   is Reliable and forty times smaller. The shipped RViz config already does.
-
-Use the shipped config, which gets all three right:
+Settings that differ between robots live in `agent_config.json` in the agent
+directory on the robot (`~/fossbot` by default). Start from
+[`robot_agent/config.example.json`](robot_agent/config.example.json); every key
+is optional and validated at startup (see
+[`robot_agent/agent_config.py`](robot_agent/agent_config.py) for the full list
+and ranges). Install or update it with:
 
 ```bash
-ros2 launch fossbot_bridge bringup.launch.py use_rviz:=true
+scripts/restart_agent.sh <user>@<robot> --config my-robot.json
 ```
 
-## Lidar orientation
+Routine deployment preserves `agent_config.json`; `--config` explicitly replaces
+it, and `--invert` updates only motor polarity. Keep your robots' files outside
+this repository. Wi-Fi credentials, SSH logins, hostnames and deployment paths
+belong in your site's connection instructions, not in the shared defaults.
 
-Two independent corrections, both in `config/bridge.yaml`:
+### 1. Motor direction
 
-- **`invert: true`** — the RPLIDAR reports angles increasing *clockwise*, ROS
-  `LaserScan` is *counter-clockwise*. Without this the scan is mirrored, and
-  no rotation can fix it. The tell-tale is that adding offset rotates the
-  picture the *wrong way*.
-- **`angle_offset_deg: -90`** — `lidar_scan_frame` inherits `base_link`'s +90°
-  yaw, because the CAD model was exported with the robot facing along its own
-  Y axis.
+Motor polarity depends on how the motor leads were soldered. Lift the robot so
+the wheels are free, start teleop, press `e`, then `w` and `a`:
 
-To check the alignment rather than guess, put an object about 30 cm directly in
-front of the robot and run:
+| `w` (forward) | `a` (turn left) | Fault | Fix |
+|---|---|---|---|
+| forward | left | none | |
+| **backward** | **right** | both motors reversed | `--invert both` |
+| forward | **right** | left/right channels swapped | swap the motor connectors |
+| **backward** | left | robot frame 180° out | check which end you call the front |
+
+Apply the fix when deploying; it is stored in the robot's `agent_config.json`
+and kept on every later deploy:
+
+```bash
+scripts/restart_agent.sh <user>@<robot> --invert both
+```
+
+`--invert` takes `none`, `left`, `right` or `both`, and changes only those two
+settings in the robot's config. It works on `setup_robot.sh` too.
+
+**Do not use `/odom` to check this.** With direction-less encoders, odometry
+always agrees with the command, even when the robot drives the other way.
+
+### 2. Motor feedforward (optional, improves tracking)
+
+`wheel_calibrate` drives both wheels at a series of raw duties, forward and
+reverse, measures the speed each produces, and fits a per-motor, per-direction
+model `duty = static_duty + duty_per_mps × |speed|`. It talks to the agent
+directly, so stop the ROS bringup and teleop first.
+
+```bash
+# Print the plan without connecting or moving anything:
+PYTHONPATH=ws/src/fossbot_bridge python3 -m fossbot_bridge.wheel_calibrate --host <robot>
+
+# On the floor, with clear space for slightly curved travel:
+PYTHONPATH=ws/src/fossbot_bridge python3 -m fossbot_bridge.wheel_calibrate \
+  --host <robot> --run --condition floor --output floor-run1.json
+```
+
+If the default duties (6–20%) do not overcome rolling friction, raise them
+explicitly, e.g. `--max-duty 0.40 --duties 0.30 0.33 0.36 0.40`. Each fit needs
+at least three moving levels with eight encoder ticks each; inconclusive data is
+reported rather than turned into a correction. The sweep aborts on telemetry
+loss, low supply voltage or unexpected command echoes, and the robot's 500 ms
+watchdog stops the motors if the tool dies.
+
+Copy each valid fit into the config as `[static_duty, duty_per_mps]`:
+
+```json
+"motor_ff_left_forward": [0.13, 1.03]
+```
+
+**Repeat the run and compare before trusting it.** Fits from separate runs on
+the same robot can differ substantially, especially near the stiction
+threshold. Suspended runs show motor asymmetry but are not floor calibration.
+The defaults reproduce a plain proportional feedforward, and the closed loop
+corrects the rest either way.
+
+### 3. Gyro heading hold (optional)
+
+The encoders are too coarse to hold a heading well; the IMU gyro is not.
+Heading hold is off by default because the gyro's sign must be verified on
+each robot first — the wrong sign turns it into positive feedback:
+
+```bash
+ros2 run fossbot_bridge gyro_sign_check
+```
+
+Then set `"gyro_sign"` as reported and `"gyro_heading_kp": 0.25`.
+
+### 4. Lidar alignment
+
+`bridge.yaml` sets `invert: true` and `angle_offset_deg: -90` for the standard
+mount. To check yours, put an object about 30 cm directly in front of the robot:
 
 ```bash
 ros2 run fossbot_bridge scan_bearing
 ```
 
-It prints the bearing of the nearest return in `base_footprint` using the real
-TF, so it reports what RViz actually draws. Straight ahead should read ~0°, an
-object on the left ~+90°.
+Straight ahead should read about 0°, an object on the left about +90°. If adding
+offset rotates the scan the *wrong* way, the scan is mirrored: fix `invert`
+before touching the offset — no rotation can correct a mirror.
 
-## Motor direction
+## Battery
 
-`MOTOR_LEFT_INVERT` and `MOTOR_RIGHT_INVERT` in `fossbot_agent.py` are both
-`True` on this robot: the motor leads are soldered such that the TB6612's
-IN1/IN2 convention drives both wheels backwards. Symptom was `w` driving the
-robot in reverse *and* `a`/`d` turning the wrong way.
+The reference FOSSBot v2 PCB has no battery voltage sense, so by default the charge in
+`/fossbot/battery` and the dashboard is **estimated from the Pi's regulated
+5 V rail**, mapped linearly between `battery_rail_empty_v` (4.65 V) and
+`battery_rail_full_v` (4.90 V) and smoothed over 10 s. A regulated rail stays
+near 5 V for most of the discharge and only sags once the battery can no longer
+hold it, so this gauge is coarse: it says "fine" for most of the run and then
+drops quickly. Treat it as an early warning, not a fuel gauge. The Pi 5 flags
+undervoltage near 4.63 V and resets around 4.4 V.
 
-Those two symptoms together identify the fault uniquely, which is worth
-remembering:
+For a real reading, wire a resistor divider from the battery pack to a spare
+ADC header and tell the bridge about it in `bridge.yaml`:
 
-| Symptom | Cause |
-|---|---|
-| Forward reversed, turns **also** reversed | Both motors wired backwards — negating both wheel velocities gives `v' = -v` and `w' = -w` at once |
-| Turns reversed, forward **correct** | Left/right channels swapped |
-| Forward reversed, turns **correct** | Robot frame is 180° out (rotation about +Z is unaffected by yawing the frame) |
+```yaml
+battery_source: "adc"
+battery_adc_index: 11        # J10 (U7 ch3); J11 is 14
+battery_divider_ratio: 3.0   # V_pack / V_adc; keep V_adc below 3.3 V
+battery_cells: 2             # series Li-ion cells
+```
 
-Verified on this robot: channel A drives the `L_ODO` encoder and the physical
-**left** wheel; channel B drives `R_ODO` and the **right** wheel. Positive duty
-on either drives that wheel forwards.
-
-**Do not use `/odom` to check drive direction.** The encoders are single
-channel, so tick sign comes from the *commanded* direction — odometry
-structurally cannot disagree with the command, and will happily report forward
-motion while the robot reverses. Only physical observation, or the IMU gyro for
-rotation, is ground truth here.
-
-## Calibration
-
-Two constants decide whether `/odom` means anything:
-
-- `wheel_radius` = **0.03524 m**, from the v2 URDF wheel mesh (70.47 mm
-  diameter). Note the upstream library says 6.65 cm for v1 hardware — if your
-  wheels are the older ones, use 0.03325.
-- `wheel_track` = **0.1866 m**. This is the distance between the wheel *centre
-  planes*, not between the URDF joint origins (±0.0779, which would give
-  0.1559). Using the joint origins puts about 17% error into every rotation.
-- `encoder_ticks_per_rev` = **20**, matching the upstream library's
-  `sensor_disc = 20` and consistent with measured tick rates at known duty.
-
-**The encoders are the accuracy floor.** They are single-channel slotted discs:
-20 ticks per revolution, and no direction information at all — tick sign comes
-from the commanded motor direction, so a wheel pushed backwards by hand still
-counts up. At 0.1 m/s a wheel produces about 9 ticks/s, so a 0.2 s velocity
-window sees fewer than 2 ticks. That quantization, not the controller, is what
-sets the 2.6–18.5% velocity error measured above. `/odom` covariance is set
-loose on purpose; do not let a filter trust it.
-
-To calibrate properly, put the robot on the floor (not suspended — free-spinning
-wheels turn far faster than loaded ones), drive a measured straight line, and
-compare `/odom` position against the tape measure.
+The charge is then read off a Li-ion discharge curve per cell. For example,
+20 kΩ from the pack to the header and 10 kΩ from the header to ground gives a
+ratio of 3.0, which keeps a full 2S pack (8.4 V) at 2.8 V on the ADC.
 
 ## Camera
 
-The robot carries an IMX708 (Camera Module 3, with autofocus). Getting it
-working needed a detour worth recording:
+Ubuntu 24.04 cannot drive a Raspberry Pi 5 camera with its own packages: it
+ships libcamera 0.2.0, whose only Raspberry Pi IPA is for the Pi 4 ISP (VC4).
+The Pi 5's PiSP needs a newer libcamera, and `rpicam-apps` and `picamera2` are
+not packaged. `cam --list` comes up empty even though the sensor probes fine.
 
-**Ubuntu 24.04 cannot drive a Pi 5 camera as shipped.** It packages libcamera
-0.2.0, whose only Raspberry Pi IPA is `ipa_rpi_vc4.so` — the Pi 4 ISP. The Pi 5
-uses PiSP and needs `ipa_rpi_pisp.so`, which is absent, so `cam --list` comes up
-empty even though the sensor probes fine. `rpicam-apps` and `python3-picamera2`
-are not in the Ubuntu archive at all. There is no V4L2 shortcut either: the Pi 5
-CSI emits only raw Bayer and PiSP does the debayer, auto-exposure and white
-balance, so bypassing it gives dark green frames at a 1536x864 minimum mode.
-
-`robot_agent/build_camera_stack.sh` builds the real stack — `libpisp`, then
-Raspberry Pi's `libcamera` fork with `-Dpipelines=rpi/pisp`, then `rpicam-apps`.
-It installs to `/ws/opt/camera`, which is on the robot's real filesystem, so it
-survives recreating the `fb` container and does not add half an hour to every
-image rebuild. Run it once:
+`setup_robot.sh --camera` builds `libpisp`, Raspberry Pi's `libcamera` fork and
+`rpicam-apps` into `~/fossbot/opt/camera` on the robot (it survives container
+recreation). To build it later:
 
 ```bash
-sudo docker exec -it fb bash /ws/build_camera_stack.sh
+ssh -t <user>@<robot> docker exec -it fb bash /ws/build_camera_stack.sh
 ```
 
-It defaults to `JOBS=2` and runs under `nice`: a four-core `ninja` dropped this
-robot off the network mid-build once, and the build tree lives under `/ws` so an
-interrupted run resumes rather than restarting.
+Frames travel as JPEG (about 22 kB at 640×480) and are decoded on the PC.
+`/camera/image_raw` is published **Best Effort**: 921 kB frames pushed Reliable
+at 15 Hz overrun the publisher's history and drop half the frames. Use Best
+Effort in RViz for it, or `/camera/image_raw/compressed`, which is Reliable.
 
-The agent then runs `rpicam-vid --codec mjpeg` and relays frames; the PC decodes.
-JPEG rather than raw because 640x480 RGB8 is 921 kB a frame — 110 Mbit/s at
-15 fps, against roughly 5 Mbit/s for JPEG at quality 80.
+## Troubleshooting
 
-`CameraInfo` is a **nominal pinhole model derived from the lens FOV, not a
-calibration**: zero distortion, centred principal point. Fine for RViz and for
-anything that just wants image geometry; wrong for photogrammetry or visual
-odometry. Run `camera_calibration` against a checkerboard and replace `K`/`D`
-if you need metric accuracy.
+**RViz shows topics but draws nothing.** Three independent causes:
+`robot_state_publisher` is not running (so `lidar_scan_frame` has no
+transform — check with `ros2 run tf2_ros tf2_echo base_footprint lidar_scan_frame`),
+the Fixed Frame is `map` while nothing publishes `map` (use `odom`), or a QoS
+mismatch. Use the bundled config: `use_rviz:=true`.
 
-## The robot's clock
+**`ros2 topic list` shows only `/parameter_events` and `/rosout`.** Nothing is
+running. A launch started in an interactive shell dies with that shell.
 
-There is no RTC battery and this lab network blocks NTP (UDP 123 to
-ntp.ubuntu.com times out), so every cold boot came up months out of date, which
-makes apt reject every repository with "Release file is not valid yet".
-`http-time-sync.service` on the robot now sets the clock from an HTTP `Date`
-header at boot (source kept in `robot_agent/http-time-sync.sh`). It retries for
-a few minutes, because `network-online.target` fires before wifi has actually
-associated and got a lease — the first version ran one second into boot, failed
-every fetch, and left the clock wrong anyway. Nothing in the bridge depends on the robot's wall clock — ROS
-stamps use the PC clock and odometry uses time *differences* — but apt and TLS
-do.
+**`package 'fossbot_description' not found`.** The container was recreated and
+fell back to the workspace baked into the image. `./run.sh` rebuilds the
+workspace every time; inside the container, run
+`cd /ws && colcon build --symlink-install`.
 
-## Power: the robot resets under motor load
+**`robot_host` is required / `Set robot_host or FOSSBOT_HOST`.** Pass
+`robot_host:=<robot>`, or start the container with `FOSSBOT_HOST` set.
 
-This robot **cuts out while driving**. The evidence says brownout, not throttle:
-after a drop-out `vcgencmd get_throttled` reads `0x0` with an uptime of seconds.
-Undervoltage *throttling* would keep the Pi up and latch bit 0/bit 16 — but if
-the rail collapses the SoC cannot record anything, and the register comes back
-clear because it reset. Motor current is the trigger.
+**Teleop does nothing.** Press `e`. Teleop also needs a real terminal: attach
+with `docker exec -it`, not plain `docker exec`.
 
-### Watching it
+**The robot resets while driving.** On the reference Raspberry Pi 5 platform,
+this is usually a weak battery: motor current sags the supply until it browns
+out. Watch `/fossbot/battery`; the Pi 5
+flags undervoltage near 4.63 V and resets around 4.4 V. After a reset,
+`vcgencmd get_throttled` reads `0x0` — not because nothing happened, but
+because the reset cleared it. The agent ramps motor duty and caps it at 85% to
+limit current spikes; the real fix is a charged battery or a stronger supply.
 
-`/fossbot/battery` publishes a `sensor_msgs/BatteryState`, and
-`/fossbot/link_status` carries `supply_volts`, `supply_amps` and a `low_voltage`
-flag. The bridge logs a throttled warning below `supply_warn_v` (4.75 V).
+**apt on the robot fails with "Release file is not valid yet".** The clock is
+wrong. Systems without a battery-backed RTC depend on NTP; on networks that
+block NTP, install the HTTP clock sync with `setup_robot.sh --http-time`.
 
-```bash
-ros2 topic echo /fossbot/battery --once
-```
+**The agent log says `GPIO busy` a few times.** Normal after a restart: the
+kernel releases the previous process's GPIO lines asynchronously, and the agent
+retries until it can claim them.
 
-The measurement is the Pi 5's own PMIC (`vcgencmd pmic_read_adc`, field
-`EXT5V_V`) — there is no battery divider on this PCB, every spare ADC channel
-reads zero. Be clear about what that means:
+**No `/scan`, agent log shows lidar descriptor errors.** The lidar's serial
+buffer held stale data. The agent resets the device on each connection; if it
+persists, unplug and replug the lidar.
 
-- It **is** the 5 V rail that collapses in a brownout, so it is exactly the
-  right thing to watch for these resets, and the sag under motor load is the
-  number that predicts one.
-- It is **not** battery state of charge. If a regulator sits between the cells
-  and the Pi, it reads flat until the battery can no longer hold the rail up.
-  `percentage` is therefore published as NaN rather than invented from voltage.
+**`<robot>.local` does not resolve inside the container.** Start with
+`FOSSBOT_MDNS=1 ./run.sh` so the container can ask the host's avahi-daemon. If
+the PC has no avahi, use the robot's IP address.
 
-The agent tracks the minimum rail voltage seen (`supply_v_min` in the `status`
-service, reset with the `reset_supply_min` op), because a 2 Hz sample will miss
-the transient dip that actually trips the reset.
+## How it works
 
-Software mitigations are in the agent, and they are mitigations, not a cure:
+**One batched frame instead of per-sensor calls.** The upstream FOSSBot Python
+API reads one sensor per call. Wrapped over Wi-Fi, every read would cost a round
+trip. Instead the agent samples everything locally — SPI and I2C reads are
+sub-millisecond on the robot — and sends one 110-byte frame per cycle.
 
-- `DUTY_SLEW_PER_S` ramps duty instead of stepping it, so a stalled rotor is
-  never hit with full duty at once (stops bypass the ramp — stopping must be
-  immediate).
-- `DUTY_MAX` caps duty below 100%.
+**UDP where the newest sample wins, TCP where data must arrive.** Telemetry and
+velocity commands are UDP: a lost frame is superseded ~11 ms later, while TCP's
+head-of-line blocking would stall every later frame behind it. Services,
+lidar scans and camera frames use TCP because they are discrete or only useful
+complete. `protocol.py` defines the wire format and is deployed to both ends,
+so they cannot drift apart.
 
-**The real fix is hardware.** Worth checking, in order: whether the Pi and the
-motor driver share one supply (motor stall current sagging the 5 V rail is the
-classic cause — separate them, or add bulk capacitance across the motor supply),
-and whether the supply can actually deliver the Pi 5's rated current on top of
-the motors.
+**Wheel control is closed-loop on the robot and tracks distance, not
+velocity.** With 20 ticks per turn, a velocity estimate over a 0.2 s window
+moves in steps of 0.055 m/s — nearly half of a typical 0.12 m/s setpoint — and
+a velocity loop chasing that noise makes the robot weave. Accumulated tick
+counts are exact, so the agent integrates the commanded speed into a target
+distance and drives the error to zero. It runs at 50 Hz on the robot, so Wi-Fi
+jitter never enters the loop.
 
-Because the robot resets often, `fossbot-agent.service` on the robot restarts
-the agent automatically at boot (the `fb` container already has
-`restart: always`, but the agent inside it was started with `docker exec` and
-would not come back on its own).
+**Reliable QoS by default.** RViz subscribes Reliable, and a Best Effort
+publisher never matches a Reliable subscriber, so best-effort sensor topics
+would appear in RViz and deliver nothing. A Reliable publisher also satisfies
+the Best Effort subscriptions Nav2 and slam_toolbox use. The one exception is
+the raw camera image (see [Camera](#camera)).
 
-## Known gaps
-- **The front-right IR sensor reads ~0 counts** while the other three read ~940.
-  It is either unpopulated or faulty — check the hardware before trusting
-  `/fossbot/range/front_right`.
-- **The robot's clock is far off** (107 days behind when this was written).
-  Nothing here depends on it — ROS stamps use the PC clock and odometry uses
-  time *differences* on the robot clock — but it will break apt and TLS on the
-  robot. Fix with `sudo timedatectl set-ntp true` on the Pi.
-- **The ultrasonic sensor reports NaN**, which is correct behaviour for "no
-  echo"; no HC-SR04 appears to be fitted.
+**Wheel geometry.** `wheel_track` (0.1866 m) is the distance between the wheel
+*centre planes* in the URDF meshes, not between the URDF joint origins
+(0.1559 m), which would put ~17% error into every rotation.
 
-## Layout
+## Development
 
 ```
-robot_agent/fossbot_agent.py        runs on the Pi, owns all hardware
-ws/src/fossbot_msgs/                messages and services
+robot_agent/               runs on the robot
+  fossbot_agent.py           hardware agent
+  agent_config.py            per-robot settings schema and validation
+  config.example.json        starting point for a robot's agent_config.json
+  pinmap.py                  FOSSBot v2 PCB pin map
+  Dockerfile                 robot image
+  build_camera_stack.sh      Pi 5 camera stack build
+  http-time-sync.sh          optional clock sync for NTP-blocked networks
+  systemd/                   units installed by setup_robot.sh
+ws/src/fossbot_msgs/       messages and services
 ws/src/fossbot_bridge/
-  fossbot_bridge/protocol.py        wire format, deployed to BOTH ends
-  fossbot_bridge/bridge_node.py     telemetry -> topics, cmd_vel -> robot
-  fossbot_bridge/lidar_node.py      scan stream -> /scan
-  fossbot_bridge/teleop.py          keyboard teleop with enable handshake
-  config/bridge.yaml                all tunable parameters
+  fossbot_bridge/protocol.py wire format, deployed to BOTH ends
+  fossbot_bridge/*_node.py   bridge, lidar and camera nodes
+  fossbot_bridge/dashboard.py status window / terminal summary
+  fossbot_bridge/battery.py  charge estimation (no ROS dependency)
+  fossbot_bridge/teleop.py, scan_bearing.py, gyro_sign_check.py, wheel_calibrate.py
+  config/bridge.yaml         ROS parameters
   launch/bringup.launch.py
-Dockerfile, docker-compose.yml      the PC-side ROS 2 container
-run.sh                              build + shell
-deploy_agent.sh, restart_agent.sh   push the agent to the robot
+ws/src/fossbot_description/ URDF, meshes, RViz config
+scripts/                   setup_robot.sh, restart_agent.sh, sync_description.sh
+run.sh, Dockerfile, docker-compose.yml   PC side
 ```
 
-### Container notes
+After changing the agent or `protocol.py`, redeploy to the robot:
 
-`network_mode: host` is required, not convenience — the robot pushes telemetry
-to UDP 5005 on this machine, and behind Docker's NAT the agent would be replying
-to a translated address.
+```bash
+scripts/restart_agent.sh <user>@<robot>
+```
 
-The `/var/run/avahi-daemon/socket` mount is what makes `fossbotrpi1.local`
-resolve inside the container. nss-mdns 0.15 uses that socket, **not** the D-Bus
-one — mounting the D-Bus socket instead looks right and silently fails.
+Hardware-free tests:
+
+```bash
+PYTHONPATH=ws/src/fossbot_bridge python3 -m unittest discover -s ws/src/fossbot_bridge/test -v
+PYTHONPATH=ws/src/fossbot_bridge python3 -m unittest discover -s robot_agent/test -v
+```
+
+`fossbot_description` is derived from the FOSSBot simulation's description
+package; `scripts/sync_description.sh <path-to-fossbot_educational_description>`
+re-vendors it. See [NOTICE](NOTICE).
+
+## License
+
+MIT — see [LICENSE](LICENSE). The robot design and the URDF meshes come from the
+[FOSSBot](https://github.com/eellak/fossbot) project, also MIT; see
+[NOTICE](NOTICE).

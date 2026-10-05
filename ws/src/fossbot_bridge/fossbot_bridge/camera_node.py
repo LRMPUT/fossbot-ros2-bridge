@@ -18,6 +18,7 @@ nothing needs raw and you want the CPU back.
 """
 
 import math
+import os
 import socket
 import threading
 import time
@@ -52,7 +53,7 @@ class CameraBridge(Node):
     def __init__(self):
         super().__init__("fossbot_camera")
 
-        self.declare_parameter("robot_host", "fossbotrpi1.local")
+        self.declare_parameter("robot_host", os.environ.get("FOSSBOT_HOST", ""))
         self.declare_parameter("frame_id", "camera_optical_frame")
         self.declare_parameter("publish_raw", True)
         self.declare_parameter("horizontal_fov_deg", 66.0)
@@ -61,6 +62,8 @@ class CameraBridge(Node):
 
         p = self.get_parameter
         self.robot_host = p("robot_host").value
+        if not self.robot_host:
+            raise ValueError("Set robot_host or FOSSBOT_HOST to select a robot")
         self.frame_id = p("frame_id").value
         self.publish_raw = p("publish_raw").value
         self.hfov = math.radians(p("horizontal_fov_deg").value)

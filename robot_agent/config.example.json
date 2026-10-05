@@ -1,0 +1,18 @@
+{
+  "gpio_chip": 4,
+  "wheel_radius": 0.03524,
+  "wheel_track": 0.1866,
+  "encoder_ticks_per_rev": 20,
+  "motor_left_invert": false,
+  "motor_right_invert": false,
+  "motor_ff_left_forward": [0.0, 1.25],
+  "motor_ff_left_reverse": [0.0, 1.25],
+  "motor_ff_right_forward": [0.0, 1.25],
+  "motor_ff_right_reverse": [0.0, 1.25],
+  "duty_max": 0.85,
+  "duty_slew_per_s": 2.5,
+  "gyro_sign": 1.0,
+  "gyro_heading_kp": 0.0,
+  "lidar_device": "/dev/ttyUSB0",
+  "camera_prefix": "/ws/opt/camera"
+}

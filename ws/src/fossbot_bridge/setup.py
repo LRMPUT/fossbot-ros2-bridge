@@ -30,6 +30,8 @@ setup(
             'teleop = fossbot_bridge.teleop:main',
             'scan_bearing = fossbot_bridge.scan_bearing:main',
             'gyro_sign_check = fossbot_bridge.gyro_sign_check:main',
+            'wheel_calibrate = fossbot_bridge.wheel_calibrate:main',
+            'dashboard = fossbot_bridge.dashboard:main',
         ],
     },
 )

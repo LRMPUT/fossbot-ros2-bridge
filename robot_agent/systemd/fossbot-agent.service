@@ -9,8 +9,8 @@ Type=oneshot
 RemainAfterExit=yes
 # The fb container has restart=always so it is back after a reboot, but the
 # agent inside it was started with `docker exec` and does not come back on its
-# own. This robot resets under motor load, so without this every brownout
-# needs a manual restart_agent.sh.
+# own. This unit brings the agent back after a robot reboot or container
+# restart without a manual agent start.
 #
 # Wait for the container, then (re)start the agent inside it.
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do docker inspect -f "{{.State.Running}}" fb 2>/dev/null | grep -q true && exit 0; sleep 2; done; exit 1'

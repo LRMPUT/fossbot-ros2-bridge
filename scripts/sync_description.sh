@@ -3,7 +3,7 @@
 # Keeps fossbot_description in step with FOSSBotEduSim without making the
 # bridge depend on that workspace at build time.
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 SRC="${1:-../FOSSBotEduSim/ws_fossbot/src/fossbot_educational_description}"
 DST="ws/src/fossbot_description"
 [ -d "$SRC" ] || { echo "no description package at $SRC"; exit 1; }

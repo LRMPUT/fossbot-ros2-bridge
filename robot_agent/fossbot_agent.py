@@ -15,7 +15,7 @@ Threads:
   power     polls the Pi's PMIC for the 5 V input rail
   watchdog  cuts the motors when commands stop arriving
 
-Run:  python3 fossbot_agent.py [--pc-host 192.168.0.x]
+Run:  python3 fossbot_agent.py [--config agent_config.json] [--pc-host IP]
 The agent learns the PC's address from the first command frame it receives, so
 --pc-host is only needed if you want telemetry before sending any command.
 """
@@ -25,7 +25,6 @@ import json
 import math
 import os
 import socket
-import struct
 import sys
 import threading
 import time
@@ -39,7 +38,7 @@ import spidev
 from protocol import (
     TELEMETRY_PORT, COMMAND_PORT, SERVICE_PORT, LIDAR_PORT, CAMERA_PORT,
     pack_camera_header,
-    TELEMETRY_HZ, COMMAND_TIMEOUT_S, N_ADC,
+    TELEMETRY_HZ, COMMAND_TIMEOUT_S,
     pack_telemetry, unpack_command,
     CMD_TWIST, CMD_DIRECT, CMD_STOP,
     FLAG_MOTORS_ENABLED, FLAG_ESTOP, FLAG_LIDAR_OK, FLAG_IMU_OK,
@@ -53,8 +52,7 @@ from pinmap import (
     ULTRA_A, ULTRA_B,
 )
 
-# On a Pi 5 the RP1 header GPIOs live on gpiochip4; gpiochip0 is root-only and
-# opening it fails with 'can not open gpiochip'.
+# GPIO numbering differs across SBCs; GPIO_CHIP is selected per robot.
 GPIO_CHIP = 4
 PWM_FREQ = 1000
 
@@ -65,7 +63,7 @@ ENCODER_TICKS_PER_REV = 20
 
 # Closed-loop wheel control, run locally at 50 Hz so wifi jitter can never
 # destabilise it. Feedforward sets the duty, and a correction term removes the
-# rest -- including the ~11% left/right motor mismatch measured on this robot.
+# rest, including per-wheel differences measured during motor calibration.
 #
 # The correction tracks accumulated DISTANCE, not velocity. With 20 ticks/rev a
 # velocity estimate over a 0.2 s window quantises to 0.055 m/s -- 46% of a
@@ -76,17 +74,9 @@ ENCODER_TICKS_PER_REV = 20
 # the commanded velocity and driving the position error to zero gives the same
 # steady-state speed, keeps the two wheels in lockstep (so the robot holds a
 # heading), and is inherently smooth.
-# Gain is deliberately low, and there is a deadband, because the FEEDBACK is
-# quantised: one tick is 11 mm of position. At POS_KP=5 that became a 0.055
-# duty step every time a tick landed, and the loop limit-cycled at ~2.4 Hz --
-# measured with the IMU gyro as 29 yaw-direction reversals in 6 s. Never react
-# to error smaller than the sensor can resolve: inside one tick the controller
-# simply does not know it is wrong.
-# A FULL-tick deadband was too much: it cut chatter (yaw stdev 0.268 -> 0.114
-# rad/s) but removed so much authority that heading drift went from +3.7 to
-# -21.2 deg over 0.7 m, and low-speed commands risked not overcoming stiction
-# at all. Half a tick keeps the sub-resolution chatter out without gutting the
-# correction.
+# Feedback is quantised: on the reference wheel and encoder, one tick is
+# about 11 mm of travel. Low gain, a fractional-tick deadband and smoothing
+# limit correction chatter. Tune these per robot under its intended load.
 POS_KP = 3.0            # duty per metre of lag
 POS_DEADBAND_TICKS = 0.5  # ignore error below this many encoder ticks
 POS_CORR_ALPHA = 0.35   # low-pass on the correction, per control step
@@ -98,15 +88,14 @@ VEL_WINDOW_S = 0.40     # only for reporting measured speed, not for control
 # sampled at 100 Hz on the robot. Feeding (commanded yaw - measured yaw) into a
 # differential duty correction is the right fix for weaving.
 #
-# DISABLED BY DEFAULT (gain 0) because the gyro's sign convention on this board
-# has NOT been verified against physical rotation yet -- the test that would have
-# confirmed it was cut short when the robot browned out. A wrong sign turns this
-# into positive feedback and makes weaving far worse.
+# Disabled by default (gain 0): verify the gyro sign against physical rotation
+# on each robot before enabling it. A wrong sign causes positive feedback.
 #
 # To enable: verify the sign first with
 #     ros2 run fossbot_bridge gyro_sign_check
 # which commands a slow left turn and reports the measured yaw sign. If it
-# reports NEGATIVE, set GYRO_SIGN = -1. Then set GYRO_HEADING_KP to ~0.25.
+# reports NEGATIVE, set gyro_sign to -1 in agent_config.json, then set
+# gyro_heading_kp to approximately 0.25 and check its response.
 GYRO_HEADING_KP = 0.0
 GYRO_SIGN = 1.0
 GYRO_BIAS_ALPHA = 0.002   # slow bias tracking, only while stationary
@@ -126,36 +115,33 @@ CAMERA_HEIGHT = 480
 CAMERA_FPS = 15
 CAMERA_QUALITY = 80
 
-# The TB6612's IN1/IN2 polarity versus which way the wheel physically turns
-# depends on how the motor leads are soldered, and on this robot both are
-# reversed: commanding forward drove the robot backwards AND mirrored every
-# turn. Those two symptoms together are the signature of exactly this fault --
-# negating both wheel velocities gives v' = -v and w' = -w at the same time.
-# A left/right channel swap would mirror only the turns, and a 180 deg frame
-# error would mirror only forward/back, so neither fits.
-#
-# Flip these if a rebuilt robot drives the other way.
-MOTOR_LEFT_INVERT = True
-MOTOR_RIGHT_INVERT = True
+# The TB6612's IN1/IN2 polarity versus which way a wheel physically turns
+# depends on how the motor leads were soldered, so it varies between robots and
+# is set per robot in agent_config.json. Diagnose it from what the robot does:
+#   forward reversed AND turns reversed -> both motors inverted
+#   turns reversed, forward correct     -> left/right channels swapped (wiring)
+#   forward reversed, turns correct     -> robot frame is 180 deg out
+# Do not use /odom to check: encoder sign is taken from the commanded
+# direction, so odometry always agrees with the command.
+MOTOR_LEFT_INVERT = False
+MOTOR_RIGHT_INVERT = False
+
+# Serial device of the RPLIDAR's USB-UART bridge.
+LIDAR_DEVICE = "/dev/ttyUSB0"
 
 # Slew-rate limit on duty, and a cap below 100%.
 #
-# This robot resets under motor load: after a drop-out `vcgencmd get_throttled`
-# reads 0x0 with an uptime of seconds, which is a full power loss rather than
-# undervoltage throttling -- a throttle event would stay up and latch bit 0/16,
-# but the SoC cannot record anything if the rail collapses. Stepping the duty
-# straight to its target draws peak inrush from a stalled rotor, so ramp
-# instead. This is a mitigation, not a cure: the real fix is a supply that can
-# hold up under motor current.
+# Motor startup can draw high current and sag the robot's supply. Slew-limit
+# duty to reduce current spikes; adapt this limit to the installed motor driver
+# and power source.
 DUTY_SLEW_PER_S = 2.5   # full-scale duty change per second (0 -> 1 in 0.4 s)
 DUTY_MAX = 0.85
 
-# Supply monitoring. There is no battery divider on this PCB (all spare ADC
-# channels read ~0), so the measurement comes from the Pi 5's own PMIC:
+# Supply monitoring on the reference Pi 5 platform uses its PMIC:
 # `vcgencmd pmic_read_adc` reports EXT5V_V, the 5 V rail as seen at the Pi.
 #
 # Note what this is and is not. It is the rail that collapses during a brownout,
-# so it is exactly the right thing to watch for the resets this robot suffers.
+# so it is exactly the right thing to watch for load-induced resets.
 # It is NOT battery state of charge: if a regulator sits between the cells and
 # the Pi, this reads flat until the battery can no longer hold it up.
 #
@@ -164,11 +150,25 @@ SUPPLY_POLL_S = 0.5
 SUPPLY_WARN_V = 4.75
 SUPPLY_CRITICAL_V = 4.63
 
-# Feedforward only: duty = target / MAX_LINEAR, with the PI term removing
-# whatever is left. Derived from a measured 40% duty giving ~0.58 m/s with the
-# wheels free, then derated for rolling load. It does not need to be exact --
-# a wrong value costs settling time, not steady-state accuracy.
+# Default feedforward scale: duty = target / MAX_LINEAR. This is a starting
+# estimate; use per-motor models measured under the intended load to tune it.
 MAX_LINEAR = 0.80
+
+# Per-motor feedforward: (static duty, duty per m/s). wheel_calibrate estimates
+# these independently in both directions. Defaults preserve the old response.
+# Fit under the intended load before applying: suspended results are diagnostic.
+MOTOR_FF_LEFT_FORWARD = (0.0, 1.0 / MAX_LINEAR)
+MOTOR_FF_LEFT_REVERSE = (0.0, 1.0 / MAX_LINEAR)
+MOTOR_FF_RIGHT_FORWARD = (0.0, 1.0 / MAX_LINEAR)
+MOTOR_FF_RIGHT_REVERSE = (0.0, 1.0 / MAX_LINEAR)
+
+
+def motor_feedforward(speed, forward, reverse):
+    """Signed affine motor model; a zero target always produces zero duty."""
+    if speed == 0.0:
+        return 0.0
+    static, slope = forward if speed > 0.0 else reverse
+    return math.copysign(static + slope * abs(speed), speed)
 
 
 class Hardware:
@@ -364,9 +364,8 @@ class Hardware:
             lgpio.gpio_write(self.h, in2, 0)
             return 1
         fwd = (duty > 0) != invert
-        # No stiction floor: remapping the magnitude into a [floor, 1] band
-        # would put a nonlinearity inside the PI loop and set a high minimum
-        # speed. The integrator walks the duty up through stiction instead.
+        # Apply requested duty unchanged. Any calibrated static-friction term
+        # belongs in feedforward, not a nonlinear remapping of feedback output.
         mag = min(abs(duty), 1.0)
         lgpio.gpio_write(self.h, in1, 1 if fwd else 0)
         lgpio.gpio_write(self.h, in2, 0 if fwd else 1)
@@ -420,8 +419,9 @@ class Hardware:
             if vl == 0.0 and vr == 0.0:
                 self.set_motors(0.0, 0.0, slew=False)
         else:
-            self.set_motors(max(-1.0, min(1.0, vl / MAX_LINEAR)),
-                            max(-1.0, min(1.0, vr / MAX_LINEAR)))
+            self.set_motors(
+                motor_feedforward(vl, MOTOR_FF_LEFT_FORWARD, MOTOR_FF_LEFT_REVERSE),
+                motor_feedforward(vr, MOTOR_FF_RIGHT_FORWARD, MOTOR_FF_RIGHT_REVERSE))
 
     def measure_speeds(self, now, enc_l, enc_r):
         """Wheel speed in m/s from a ~VEL_WINDOW_S window of encoder ticks."""
@@ -479,8 +479,10 @@ class Hardware:
             self.corr_l += POS_CORR_ALPHA * (POS_KP * eff_l - self.corr_l)
             self.corr_r += POS_CORR_ALPHA * (POS_KP * eff_r - self.corr_r)
 
-            duty_l = tl / MAX_LINEAR + self.corr_l
-            duty_r = tr / MAX_LINEAR + self.corr_r
+            duty_l = motor_feedforward(
+                tl, MOTOR_FF_LEFT_FORWARD, MOTOR_FF_LEFT_REVERSE) + self.corr_l
+            duty_r = motor_feedforward(
+                tr, MOTOR_FF_RIGHT_FORWARD, MOTOR_FF_RIGHT_REVERSE) + self.corr_r
 
             if GYRO_HEADING_KP > 0.0:
                 # Differential correction: speed up one wheel and slow the
@@ -928,7 +930,7 @@ class Agent:
         for attempt in range(1, attempts + 1):
             lidar = None
             try:
-                lidar = RPLidar("/dev/ttyUSB0")
+                lidar = RPLidar(LIDAR_DEVICE)
                 for fn in (lidar.stop, lidar.stop_motor):
                     try:
                         fn()
@@ -1010,11 +1012,43 @@ class Agent:
             self.hw.close()
 
 
+DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "agent_config.json")
+
+
+def apply_config(path):
+    """Override this module's per-robot constants from a JSON file.
+
+    Must run before Hardware() opens any device. A missing file is not an
+    error -- every constant has a generic default -- but motor direction and
+    feedforward are then unverified for this robot, so say so loudly.
+    """
+    if not os.path.exists(path):
+        print(f"[agent] no config at {path}: using generic defaults. Motor "
+              f"direction is UNVERIFIED for this robot -- see README, "
+              f"'Per-robot setup'.", flush=True)
+        return {}
+    from agent_config import load_config
+    overrides = load_config(path)
+    module = sys.modules[__name__]
+    for name, value in overrides.items():
+        if not hasattr(module, name):
+            raise ValueError(f"config key {name.lower()} has no agent constant")
+        setattr(module, name, value)
+    print(f"[agent] config {path}: {', '.join(sorted(overrides)) or 'empty'}",
+          flush=True)
+    return overrides
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--config",
+                    default=os.environ.get("FOSSBOT_AGENT_CONFIG", DEFAULT_CONFIG),
+                    help="per-robot settings (see agent_config.py for keys)")
     ap.add_argument("--pc-host", default=os.environ.get("FOSSBOT_PC_HOST"),
                     help="where to send telemetry before any command arrives")
     args = ap.parse_args()
+    apply_config(args.config)
     Agent(args.pc_host).run()
 
 

@@ -1,11 +1,13 @@
-Provenance
-==========
+This project is released under the MIT License (see LICENSE).
 
-ws/src/fossbot_description contains URDF and STL meshes derived from
-`fossbot_educational_description` in LRMPUT/FOSSBotEduSim, with the gazebo
-plugin block removed (on real hardware the bridge publishes those topics
-instead). `sync_description.sh` re-vendors them.
+It builds on the FOSSBot open-source educational robot
+(https://github.com/eellak/fossbot, MIT License):
 
-That upstream package declares no license, so fossbot_description does not
-assert one. fossbot_bridge and fossbot_msgs are original to this repository and
-are currently marked MIT -- change that if it does not match the group's policy.
+- ws/src/fossbot_description contains a URDF and STL meshes of the FOSSBot v2,
+  derived from the `fossbot_educational_description` package of the FOSSBot
+  Gazebo simulation, with the gazebo plugin block removed (on real hardware the
+  bridge publishes those topics instead). scripts/sync_description.sh
+  re-vendors them.
+- robot_agent/pinmap.py follows the FOSSBot v2 main PCB schematic.
+- The encoder disc resolution (20 slots) matches the upstream FOSSBot Python
+  library.

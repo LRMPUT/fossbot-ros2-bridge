@@ -8,6 +8,7 @@ dropping the rest of the bridge.
 
 import json
 import math
+import os
 import socket
 import threading
 import time
@@ -30,7 +31,7 @@ class LidarBridge(Node):
     def __init__(self):
         super().__init__("fossbot_lidar")
 
-        self.declare_parameter("robot_host", "fossbotrpi1.local")
+        self.declare_parameter("robot_host", os.environ.get("FOSSBOT_HOST", ""))
         self.declare_parameter("frame_id", "lidar_scan_frame")
         self.declare_parameter("angle_bins", 360)
         self.declare_parameter("range_min", 0.15)
@@ -42,6 +43,8 @@ class LidarBridge(Node):
 
         p = self.get_parameter
         self.robot_host = p("robot_host").value
+        if not self.robot_host:
+            raise ValueError("Set robot_host or FOSSBOT_HOST to select a robot")
         self.frame_id = p("frame_id").value
         self.bins = int(p("angle_bins").value)
         self.range_min = p("range_min").value
@@ -127,7 +130,7 @@ class LidarBridge(Node):
         scan.range_max = self.range_max
         # Measure the rotation period rather than assuming it: the A1M8's spin
         # rate drifts with supply voltage (observed between 3.3 and 6.7 Hz on
-        # this robot), and Nav2 / slam_toolbox use scan_time to motion-compensate.
+        # the reference robot), and Nav2 / slam_toolbox use scan_time to motion-compensate.
         now = time.monotonic()
         if self.last_scan_t is not None:
             dt = now - self.last_scan_t

@@ -15,3 +15,10 @@ __pycache__/
 *.log
 .vscode/
 .idea/
+
+# Per-robot settings and calibration output: they describe one physical robot,
+# not the project. The robot keeps its own agent_config.json.
+robot_agent/agent_config.json
+agent_config.json
+motor-*.json
+*-calibration.json

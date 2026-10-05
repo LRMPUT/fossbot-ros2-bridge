@@ -1,0 +1,18 @@
+# Optional. Sets the clock from an HTTP Date header on systems without a
+# battery-backed RTC when NTP is unavailable.
+[Unit]
+Description=Set clock from an HTTP Date header (for networks that block NTP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/http-time-sync.sh
+RemainAfterExit=yes
+# The script retries internally; restart as well in case wifi is down for
+# minutes after boot.
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

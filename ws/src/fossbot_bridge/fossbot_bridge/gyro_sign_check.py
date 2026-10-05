@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Verify the IMU gyro's sign against a commanded rotation.
 
-Needed before enabling GYRO_HEADING_KP in the agent: closing a heading loop
-with the wrong sign turns it into positive feedback.
+Needed before enabling gyro_heading_kp in the robot's agent_config.json:
+closing a heading loop with the wrong sign turns it into positive feedback.
 
 Commands a slow LEFT (counter-clockwise, positive angular.z in ROS) rotation and
 reports the measured yaw sign. Put the robot on the floor with room to turn.
@@ -79,11 +79,15 @@ def main(args=None):
               "stiction, or the robot reset.")
         return 1
     if mean > 0:
-        print("  gyro is CONVENTIONAL (+z = counter-clockwise). GYRO_SIGN = 1.0")
+        sign = 1
+        print("  gyro is CONVENTIONAL (+z = counter-clockwise)")
     else:
-        print("  gyro is INVERTED relative to ROS. Set GYRO_SIGN = -1.0")
-    print("  then set GYRO_HEADING_KP to about 0.25 in fossbot_agent.py "
-          "and redeploy with ./restart_agent.sh")
+        sign = -1
+        print("  gyro is INVERTED relative to ROS")
+    print("  add to the robot's agent_config.json, then redeploy with "
+          "scripts/restart_agent.sh:")
+    print(f'      "gyro_sign": {sign},')
+    print('      "gyro_heading_kp": 0.25')
     rclpy.shutdown()
     return 0
 

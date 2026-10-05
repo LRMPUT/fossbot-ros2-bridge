@@ -1,7 +1,7 @@
 """Wire protocol shared by the robot-side agent and the PC-side ROS 2 bridge.
 
 This file is the single source of truth for the link. It is deployed verbatim to
-the robot (see deploy_agent.sh), so the two ends cannot drift apart.
+the robot (see scripts/common.sh), so the two ends cannot drift apart.
 
 Transport layout, chosen for latency rather than tidiness:
 
@@ -170,7 +170,7 @@ def unpack_camera_header(buf):
 
 # --- ADC channel map --------------------------------------------------------
 # Index into the telemetry adc[] array. Order is U8 ch0..7 then U7 ch0..7,
-# matching ~/dev/pinmap.py on the robot.
+# matching the target robot's pinmap.py.
 ADC_DIST_BL = 4
 ADC_DIST_FL = 5
 ADC_LINE_LEFT = 6

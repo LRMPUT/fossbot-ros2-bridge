@@ -1,13 +1,11 @@
 #!/bin/bash
 # Set the system clock from an HTTP Date header.
 #
-# This robot has no RTC battery and the lab network blocks NTP (UDP 123 to
-# ntp.ubuntu.com times out), so every cold boot comes up months out of date,
-# which makes apt reject every repository with "Release file is not valid yet".
+# Optional clock recovery for systems without a battery-backed RTC when NTP is
+# unavailable; an incorrect clock can make package indexes and TLS fail.
 #
-# Retries, because network-online.target fires before wifi has actually
-# associated and got a DHCP lease: the first version of this ran one second
-# into boot, failed every fetch, and left the clock wrong.
+# Retries because network-online.target may fire before network association or
+# DHCP is complete.
 set -u
 ATTEMPTS="${ATTEMPTS:-30}"
 DELAY="${DELAY:-6}"

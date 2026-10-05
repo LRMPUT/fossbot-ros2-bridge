@@ -12,28 +12,16 @@ services:
     network_mode: host
     ipc: host
     environment:
+      # Which robot to talk to: hostname or IP. Read by the bringup launch file.
+      - FOSSBOT_HOST=${FOSSBOT_HOST:-}
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-      - DISPLAY=${DISPLAY}
-      - QT_X11_NO_MITSHM=1
       - XDG_RUNTIME_DIR=/tmp/runtime-root
-      - LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-0}
+      - LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-1}
     volumes:
       # Live-mount the source so edits take effect without a rebuild
       # (the image is built with --symlink-install).
       - ./ws/src:/ws/src
-      # Lets libnss-mdns inside the container ask the host's avahi-daemon to
-      # resolve fossbotrpi1.local, so the robot can be addressed by name even
-      # when DHCP moves it. nss-mdns 0.15 uses this socket, NOT the D-Bus one.
-      - /var/run/avahi-daemon/socket:/var/run/avahi-daemon/socket:rw
-      # X11 for rviz2 / rqt. Needs `xhost +local:docker` on the host once per
-      # login; run.sh does that for you.
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ${XAUTHORITY:-/home/${USER}/.Xauthority}:/root/.Xauthority:rw
-    devices:
-      # GPU node for rviz2. Drop this line and set LIBGL_ALWAYS_SOFTWARE=1 if
-      # the machine has no /dev/dri.
-      - /dev/dri:/dev/dri
     stdin_open: true
     tty: true
     command: sleep infinity

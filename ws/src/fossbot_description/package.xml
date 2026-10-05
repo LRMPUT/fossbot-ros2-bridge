@@ -6,13 +6,12 @@
   <description>
     URDF and meshes for the FOSSBot edu v2, for use with the real-robot bridge.
 
-    Derived from fossbot_educational_description in LRMPUT/FOSSBotEduSim, with
-    the gazebo plugin block removed; re-sync with sync_description.sh if the sim
-    model changes. The upstream package declares no license, so this one does
-    not assert one either -- set both together when upstream is decided.
+    Derived from the FOSSBot simulation's fossbot_educational_description
+    package, with the gazebo plugin block removed; re-sync with
+    scripts/sync_description.sh if the simulation model changes. See NOTICE.
   </description>
   <maintainer email="k.mlodzikowski@gmail.com">Kamil</maintainer>
-  <license>TODO: License declaration</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

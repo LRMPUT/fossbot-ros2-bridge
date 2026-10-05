@@ -1,0 +1,5 @@
+services:
+  fossbot_bridge:
+    volumes:
+      # Ubuntu's nss-mdns uses the host Avahi socket to resolve .local names.
+      - /var/run/avahi-daemon/socket:/var/run/avahi-daemon/socket:ro

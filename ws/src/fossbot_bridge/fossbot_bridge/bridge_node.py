@@ -8,6 +8,7 @@ hardware the sim has no equivalent for.
 """
 
 import math
+import os
 import socket
 import threading
 import time
@@ -27,6 +28,7 @@ from fossbot_msgs.msg import (AnalogRaw, Buttons, LineSensors, LinkStatus,
                               MotorCommand)
 from fossbot_msgs.srv import PlayTone, SetRGB
 
+from fossbot_bridge.battery import Smoother, liion_fraction, rail_fraction
 from fossbot_bridge.protocol import (
     TELEMETRY_PORT, COMMAND_PORT, SERVICE_PORT, TELEMETRY_SIZE,
     unpack_telemetry, pack_command,
@@ -98,7 +100,7 @@ class FossbotBridge(Node):
     def __init__(self):
         super().__init__("fossbot_bridge")
 
-        self.declare_parameter("robot_host", "fossbotrpi1.local")
+        self.declare_parameter("robot_host", os.environ.get("FOSSBOT_HOST", ""))
         self.declare_parameter("wheel_radius", 0.03524)
         self.declare_parameter("wheel_track", 0.1866)
         self.declare_parameter("encoder_ticks_per_rev", 20.0)
@@ -113,9 +115,24 @@ class FossbotBridge(Node):
         # Pi 5 flags undervoltage near 4.63 V and resets below roughly 4.4 V.
         self.declare_parameter("supply_warn_v", 4.75)
         self.declare_parameter("supply_critical_v", 4.63)
+        # Battery percentage. There is no battery sense on the FOSSBot PCB, so
+        # by default this is an ESTIMATE from the Pi's regulated 5 V rail,
+        # which stays nearly flat until the battery is close to empty. For a
+        # real reading, wire a divider from the pack to a spare ADC header
+        # (J10 = adc index 11, J11 = adc index 14) and set battery_source to
+        # "adc". See README, "Battery".
+        self.declare_parameter("battery_source", "rail")       # rail | adc
+        self.declare_parameter("battery_rail_full_v", 4.90)
+        self.declare_parameter("battery_rail_empty_v", 4.65)
+        self.declare_parameter("battery_adc_index", 11)
+        self.declare_parameter("battery_divider_ratio", 3.0)   # V_pack / V_adc
+        self.declare_parameter("battery_cells", 2)             # Li-ion, series
+        self.declare_parameter("battery_smoothing_s", 10.0)
 
         p = self.get_parameter
         self.robot_host = p("robot_host").value
+        if not self.robot_host:
+            raise ValueError("Set robot_host or FOSSBOT_HOST to select a robot")
         self.wheel_radius = p("wheel_radius").value
         self.wheel_track = p("wheel_track").value
         self.ticks_per_rev = p("encoder_ticks_per_rev").value
@@ -128,6 +145,16 @@ class FossbotBridge(Node):
         self.ir_max = p("ir_range_max").value
         self.supply_warn_v = p("supply_warn_v").value
         self.supply_critical_v = p("supply_critical_v").value
+        self.battery_source = p("battery_source").value
+        if self.battery_source not in ("rail", "adc"):
+            raise ValueError("battery_source must be 'rail' or 'adc'")
+        self.battery_rail_full_v = p("battery_rail_full_v").value
+        self.battery_rail_empty_v = p("battery_rail_empty_v").value
+        self.battery_adc_index = int(p("battery_adc_index").value)
+        self.battery_divider_ratio = p("battery_divider_ratio").value
+        self.battery_cells = int(p("battery_cells").value)
+        self.battery_smoothing_s = p("battery_smoothing_s").value
+        self.battery_smoother = Smoother(self.battery_smoothing_s)
 
         # --- publishers ---------------------------------------------------
         self.pub_odom = self.create_publisher(Odometry, "/odom", 10)
@@ -186,6 +213,10 @@ class FossbotBridge(Node):
         self.flags = 0
         self.supply_v = float("nan")
         self.supply_a = float("nan")
+        self.duty_l = 0.0
+        self.duty_r = 0.0
+        self.wheel_vel_l = 0.0
+        self.wheel_vel_r = 0.0
         # seq -> monotonic send time, for round-trip latency. The robot's wall
         # clock cannot be trusted (it can be days off), so latency is measured
         # as a true round trip rather than by differencing the two clocks.
@@ -244,6 +275,8 @@ class FossbotBridge(Node):
         self.last_seq = t["seq"]
         self.last_rx_t = now
         self.flags = t["flags"]
+        self.duty_l = float(t["duty_left"])
+        self.duty_r = float(t["duty_right"])
 
         # Round-trip: PC sent command N -> robot applied it -> robot echoed N
         # back in this telemetry frame. Independent of both wall clocks.
@@ -301,6 +334,8 @@ class FossbotBridge(Node):
         self.y += d_center * math.sin(self.yaw)
         self.wheel_pos_l += d_l / self.wheel_radius
         self.wheel_pos_r += d_r / self.wheel_radius
+        self.wheel_vel_l = d_l / self.wheel_radius / dt
+        self.wheel_vel_r = d_r / self.wheel_radius / dt
 
         odom = Odometry()
         odom.header.stamp = stamp
@@ -335,6 +370,7 @@ class FossbotBridge(Node):
         # Names must match the URDF in fossbot_educational_description.
         js.name = ["Revolute 21", "Revolute 20"]
         js.position = [self.wheel_pos_l, self.wheel_pos_r]
+        js.velocity = [self.wheel_vel_l, self.wheel_vel_r]   # rad/s
         self.pub_joints.publish(js)
 
     def publish_imu(self, t, stamp):
@@ -434,12 +470,12 @@ class FossbotBridge(Node):
         self.pub_buttons.publish(b)
 
     def publish_battery(self, t, stamp):
-        """Supply rail as a BatteryState.
+        """Supply as a BatteryState.
 
-        The voltage is the Pi's 5 V input rail measured by its PMIC, not the
-        battery terminal. It is the right thing to watch for brownouts -- it is
-        the rail that collapses -- but it is not a state-of-charge gauge, so
-        `percentage` is deliberately left NaN rather than invented from it.
+        `voltage` is always the Pi's 5 V input rail (PMIC EXT5V_V): it is the
+        rail that collapses in a brownout, so it drives the health field.
+        `percentage` comes from battery_source -- an estimate from that same
+        rail by default, or a real pack voltage from an ADC divider.
         """
         b = BatteryState()
         b.header.stamp = stamp
@@ -452,7 +488,7 @@ class FossbotBridge(Node):
         b.charge = float("nan")
         b.capacity = float("nan")
         b.design_capacity = float("nan")
-        b.percentage = float("nan")
+        b.percentage = self.battery_fraction(t)
         b.power_supply_technology = BatteryState.POWER_SUPPLY_TECHNOLOGY_UNKNOWN
         b.present = v == v and v > 1.0
 
@@ -475,7 +511,8 @@ class FossbotBridge(Node):
             b.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_GOOD
             b.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
 
-        b.location = "pi5_pmic_ext5v"
+        b.location = ("pack_via_adc" if self.battery_source == "adc"
+                      else "estimated_from_pi5_5v_rail")
         self.pub_battery.publish(b)
 
         if bool(t["flags"] & FLAG_LOW_VOLTAGE):
@@ -484,6 +521,22 @@ class FossbotBridge(Node):
                 f"{self.supply_warn_v:.2f}, resets near 4.4) -- charge the "
                 f"battery before it browns out mid-drive",
                 throttle_duration_sec=15.0)
+
+    def battery_fraction(self, t):
+        """0..1 charge, NaN if unknown; smoothed (see battery.Smoother)."""
+        if self.battery_source == "adc":
+            if not 0 <= self.battery_adc_index < len(t["adc"]):
+                return float("nan")
+            v = t["adc"][self.battery_adc_index] / 1023.0 * 3.3 \
+                * self.battery_divider_ratio
+        else:
+            v = float(t["supply_v"])
+        if v != v or v <= 0.0:
+            return float("nan")
+        v = self.battery_smoother.update(v, time.monotonic())
+        if self.battery_source == "adc":
+            return liion_fraction(v / max(self.battery_cells, 1))
+        return rail_fraction(v, self.battery_rail_empty_v, self.battery_rail_full_v)
 
     def publish_status(self):
         s = LinkStatus()
@@ -502,6 +555,9 @@ class FossbotBridge(Node):
         s.supply_volts = float(self.supply_v)
         s.supply_amps = float(self.supply_a)
         s.low_voltage = bool(self.flags & FLAG_LOW_VOLTAGE)
+        s.robot_host = str(self.robot_host)
+        s.duty_left = float(self.duty_l)
+        s.duty_right = float(self.duty_r)
         self.pub_status.publish(s)
 
     # --- commands -------------------------------------------------------

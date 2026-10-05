@@ -1,7 +1,5 @@
 /fossbot_bridge:
   ros__parameters:
-    robot_host: "fossbotrpi1.local"
-
     # Measured from the v2 URDF meshes in fossbot_educational_description.
     # wheel_track is between wheel CENTRE PLANES (+-0.0933), not between the
     # URDF joint origins (+-0.0779) -- the latter is ~17% short and skews yaw.
@@ -20,13 +18,25 @@
     # Raw MCP3008 counts below this read as "on the line".
     on_line_threshold: 200
 
+    # Battery percentage. With no battery sense on the PCB, "rail" estimates it
+    # from the Pi's regulated 5 V rail between these two voltages -- it stays
+    # nearly flat until the battery is almost empty, so treat it as coarse.
+    # "adc" reads a real pack voltage from a divider wired to a spare ADC
+    # header (J10 = index 11, J11 = index 14); see README, "Battery".
+    battery_source: "rail"
+    battery_rail_full_v: 4.90
+    battery_rail_empty_v: 4.65
+    battery_adc_index: 11
+    battery_divider_ratio: 3.0     # V_pack / V_adc; 3.0 keeps 2S Li-ion < 3.3 V
+    battery_cells: 2
+    battery_smoothing_s: 10.0
+
     ir_range_min: 0.05
     ir_range_max: 0.40
     cmd_rate_hz: 50.0
 
 /fossbot_lidar:
   ros__parameters:
-    robot_host: "fossbotrpi1.local"
     frame_id: "lidar_scan_frame"
     angle_bins: 360
     range_min: 0.15
@@ -50,7 +60,6 @@
 
 /fossbot_camera:
   ros__parameters:
-    robot_host: "fossbotrpi1.local"
     frame_id: "camera_optical_frame"
     # Decode JPEG to /camera/image_raw on this PC, matching the topic the
     # Gazebo sim publishes. Set false if nothing needs raw images.
@@ -58,3 +67,9 @@
     # Nominal lens FOV for the synthesised CameraInfo. This is not a
     # calibration -- see the note in camera_node.make_camera_info.
     horizontal_fov_deg: 66.0
+
+/fossbot_dashboard:
+  ros__parameters:
+    mode: "auto"          # auto: window if a display exists, else text
+    wheel_radius: 0.03524 # for showing wheel speed in m/s
+    text_period_s: 3.0
